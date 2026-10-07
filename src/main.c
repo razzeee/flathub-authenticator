@@ -36,6 +36,9 @@ typedef struct {
   char *update_token;
   GStrv refs;
   gboolean didWebflow;
+  unsigned int ref_count;
+  gboolean completed;
+  GCancellable *cancellable;
 } ActiveRequest;
 
 typedef struct {
@@ -47,12 +50,36 @@ typedef struct {
 static void
 active_request_free (ActiveRequest *req)
 {
+  if (--req->ref_count != 0)
+    return;
+
   g_clear_object (&req->request_impl);
   g_clear_object (&req->return_server);
+  g_clear_object (&req->cancellable);
   g_clear_pointer (&req->refs, g_strfreev);
   g_clear_pointer (&req->update_token, g_free);
   g_free (req);
   active_requests --;
+}
+
+static void
+active_request_complete (ActiveRequest *req)
+{
+  const char *path;
+
+  req->completed = TRUE;
+  g_cancellable_cancel (req->cancellable);
+  g_signal_handlers_disconnect_by_data (req->request_impl, req);
+  path = g_dbus_interface_skeleton_get_object_path (G_DBUS_INTERFACE_SKELETON (req->request_impl));
+  if (manager != NULL && path != NULL)
+    g_dbus_object_manager_server_unexport (manager, path);
+  if (req->return_server != NULL)
+    {
+      soup_server_remove_handler (req->return_server, "/success");
+      soup_server_remove_handler (req->return_server, "/cancel");
+      soup_server_disconnect (req->return_server);
+    }
+  active_request_free (req);
 }
 
 
@@ -142,6 +169,7 @@ handle_close (FlatpakAuthenticator  *authenticator,
   g_assert (IS_FLATPAK_AUTHENTICATOR_REQUEST (authenticator));
   g_assert (G_IS_DBUS_METHOD_INVOCATION (invocation));
 
+  g_dbus_method_invocation_return_value (invocation, NULL);
   end_request_with_cancellation (request);
 
   return G_DBUS_METHOD_INVOCATION_HANDLED;
@@ -196,6 +224,8 @@ handle_request_ref_token (FlatpakAuthenticator     *authenticator,
   g_dbus_object_manager_server_export (manager, object);
 
   request = g_new0 (ActiveRequest, 1);
+  request->ref_count = 1;
+  request->cancellable = g_cancellable_new ();
   active_requests ++;
   request->request_impl = g_object_ref (impl);
   request->refs = g_strdupv (ref_names);
@@ -393,11 +423,12 @@ get_download_token (ActiveRequest *request)
   {
     DownloadTokenRequest *data = g_new0 (DownloadTokenRequest, 1);
     data->request = request;
+    request->ref_count ++;
     data->message = g_object_ref (msg);
 
     soup_session_send_async (session,
                              msg,
-                             NULL,
+                             request->cancellable,
                              on_download_token_request_sent,
                              data);
   }
@@ -416,28 +447,34 @@ on_download_token_request_sent (GObject      *object,
   g_autoptr(GInputStream) stream = NULL;
   g_autoptr(GOutputStream) output_stream = NULL;
 
-  if (!(stream = soup_session_send_finish (session, res, &error)))
+  stream = soup_session_send_finish (session, res, &error);
+  if (data->request->completed)
+    goto done;
+
+  if (stream == NULL)
     {
-      clear_token (data->request);
-      g_object_unref (data->message);
-      g_free (data);
-      return;
+      end_request_with_error (data->request, "failed to contact token server");
+      goto done;
     }
 
   if (!SOUP_STATUS_IS_SUCCESSFUL (data->message->status_code))
     {
       clear_token (data->request);
-      g_object_unref (data->message);
-      g_free (data);
-      return;
+      goto done;
     }
 
   parser = json_parser_new ();
   json_parser_load_from_stream_async (parser,
                                       stream,
-                                      NULL,
+                                      data->request->cancellable,
                                       on_download_token_message_read,
                                       data);
+  return;
+
+done:
+  active_request_free (data->request);
+  g_object_unref (data->message);
+  g_free (data);
 }
 
 
@@ -454,7 +491,12 @@ on_download_token_message_read (GObject      *source_object,
   JsonNode *node;
   JsonObject *object;
 
-  if (!json_parser_load_from_stream_finish (parser, result, &error))
+  gboolean parsed = json_parser_load_from_stream_finish (parser, result, &error);
+
+  if (request->completed)
+    goto done;
+
+  if (!parsed)
     goto failed;
 
   node = json_parser_get_root (parser);
@@ -494,6 +536,7 @@ failed:
   clear_token (request);
 
 done:
+  active_request_free (request);
   g_object_unref (data->message);
   g_free (data);
 }
@@ -516,7 +559,7 @@ end_request_with_error (ActiveRequest *req,
   flatpak_authenticator_request_emit_response (req->request_impl, 2, result);
 
   g_debug ("Request ended in failure: %s", error_message);
-  active_request_free (req);
+  active_request_complete (req);
 }
 
 
@@ -528,7 +571,7 @@ end_request_with_token (ActiveRequest *request,
   flatpak_authenticator_request_emit_response (request->request_impl, 0, result);
 
   g_debug ("Request succeeded.");
-  active_request_free (request);
+  active_request_complete (request);
 }
 
 
@@ -539,7 +582,7 @@ end_request_with_cancellation (ActiveRequest *request)
   flatpak_authenticator_request_emit_response (request->request_impl, 1, result);
 
   g_debug ("Request cancelled by user.");
-  active_request_free (request);
+  active_request_complete (request);
 }
 
 

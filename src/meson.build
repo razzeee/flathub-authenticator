@@ -29,3 +29,11 @@ executable('flathub-authenticator',
   dependencies: flathub_authenticator_deps,
   install: true,
 )
+
+authenticator_test = executable('test-authenticator',
+  '../tests/test-authenticator.c',
+  flatpak_authenticator_dbus_src,
+  application_dbus_src,
+  dependencies: flathub_authenticator_deps,
+)
+test('Authenticator', authenticator_test)
