@@ -46,6 +46,20 @@ not followed, so token-bearing requests cannot be redirected to another host.
 Tests use a local mock backend and an in-memory token store; they do not
 access your keyring or contact the production service.
 
+The Flatpak manifest uses Freedesktop 26.08 and its maintained libraries.
+Build the package (including tests) with:
+
+```sh
+flatpak install --user flathub org.flatpak.Builder \
+  org.freedesktop.Sdk//26.08 org.freedesktop.Platform//26.08
+flatpak run org.flatpak.Builder --user --force-clean builddir org.flathub.Authenticator.json
+```
+
+Set deployment URLs through the main module's `config-opts` when packaging
+for a real repository.
+
+### Enabling the authenticator
+
 To configure the repository to use this app, it must first be uploaded as part of the repo. Then, run the following
 command:
 
