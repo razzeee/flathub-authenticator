@@ -38,6 +38,11 @@ typedef struct {
   gboolean didWebflow;
 } ActiveRequest;
 
+typedef struct {
+  ActiveRequest *request;
+  SoupMessage *message;
+} DownloadTokenRequest;
+
 
 static void
 active_request_free (ActiveRequest *req)
@@ -385,11 +390,17 @@ get_download_token (ActiveRequest *request)
                 "user-agent", PROGRAM_NAME " " PROGRAM_VERSION,
                 NULL);
 
-  soup_session_send_async (session,
-                           msg,
-                           NULL,
-                           on_download_token_request_sent,
-                           request);
+  {
+    DownloadTokenRequest *data = g_new0 (DownloadTokenRequest, 1);
+    data->request = request;
+    data->message = g_object_ref (msg);
+
+    soup_session_send_async (session,
+                             msg,
+                             NULL,
+                             on_download_token_request_sent,
+                             data);
+  }
 }
 
 
@@ -399,7 +410,7 @@ on_download_token_request_sent (GObject      *object,
                                 gpointer      user_data)
 {
   SoupSession *session = SOUP_SESSION (object);
-  ActiveRequest *request = (ActiveRequest *)user_data;
+  DownloadTokenRequest *data = user_data;
   g_autoptr(JsonParser) parser = NULL;
   g_autoptr(GError) error = NULL;
   g_autoptr(GInputStream) stream = NULL;
@@ -407,7 +418,18 @@ on_download_token_request_sent (GObject      *object,
 
   if (!(stream = soup_session_send_finish (session, res, &error)))
     {
-      clear_token (request);
+      clear_token (data->request);
+      g_object_unref (data->message);
+      g_free (data);
+      return;
+    }
+
+  if (soup_message_get_status (data->message) < SOUP_STATUS_OK ||
+      soup_message_get_status (data->message) >= SOUP_STATUS_MULTIPLE_CHOICES)
+    {
+      clear_token (data->request);
+      g_object_unref (data->message);
+      g_free (data);
       return;
     }
 
@@ -416,7 +438,7 @@ on_download_token_request_sent (GObject      *object,
                                       stream,
                                       NULL,
                                       on_download_token_message_read,
-                                      request);
+                                      data);
 }
 
 
@@ -428,7 +450,8 @@ on_download_token_message_read (GObject      *source_object,
   JsonParser *parser = JSON_PARSER (source_object);
   g_autoptr(GError) error = NULL;
   g_autoptr(GBytes) bytes = NULL;
-  ActiveRequest *request = (ActiveRequest *)user_data;
+  DownloadTokenRequest *data = user_data;
+  ActiveRequest *request = data->request;
   JsonNode *node;
   JsonObject *object;
 
@@ -444,23 +467,36 @@ on_download_token_message_read (GObject      *source_object,
   if (json_object_has_member (object, "missing_appids"))
     {
       redirect_to_frontend (request);
-      return;
+      goto done;
     }
 
   if ((node = json_object_get_member (object, "token")))
     {
-      if (!JSON_NODE_HOLDS_VALUE (node) || json_node_get_value_type (node) != G_TYPE_STRING)
+      if (!JSON_NODE_HOLDS_VALUE (node) ||
+          json_node_get_value_type (node) != G_TYPE_STRING ||
+          json_node_get_string (node) == NULL)
         goto failed;
 
       end_request_with_token (request, json_node_get_string (node));
-      return;
+      goto done;
     }
 
   if ((node = json_object_get_member (object, "update-token")))
-    store_update_token (json_node_get_string (node));
+    {
+      if (!JSON_NODE_HOLDS_VALUE (node) ||
+          json_node_get_value_type (node) != G_TYPE_STRING ||
+          json_node_get_string (node) == NULL)
+        goto failed;
+
+      store_update_token (json_node_get_string (node));
+    }
 
 failed:
   clear_token (request);
+
+done:
+  g_object_unref (data->message);
+  g_free (data);
 }
 
 
