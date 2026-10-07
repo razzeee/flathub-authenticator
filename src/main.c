@@ -223,6 +223,8 @@ redirect_to_frontend (ActiveRequest *request)
   g_autofree char *url = NULL;
   g_autofree char *return_uri = NULL;
   g_autofree char *ref_string = NULL;
+  g_autofree char *escaped_refs = NULL;
+  g_autofree char *escaped_return_uri = NULL;
 
   /* Prevent infinite loops if something goes wrong somewhere */
   if (request->didWebflow)
@@ -256,7 +258,10 @@ redirect_to_frontend (ActiveRequest *request)
   /* Emit the Webflow signal */
   request->didWebflow = TRUE;
   ref_string = g_strjoinv (";", request->refs);
-  url = g_strdup_printf (FRONTEND_URL "/purchase?refs=%s&return=%s", ref_string, return_uri);
+  escaped_refs = g_uri_escape_string (ref_string, NULL, FALSE);
+  escaped_return_uri = g_uri_escape_string (return_uri, NULL, FALSE);
+  url = g_strdup_printf (FRONTEND_URL "/purchase?refs=%s&return=%s",
+                         escaped_refs, escaped_return_uri);
   g_debug ("Redirecting to %s", url);
   flatpak_authenticator_request_emit_webflow (request->request_impl, url, g_variant_new ("a{sv}", NULL));
 }
