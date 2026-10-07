@@ -424,8 +424,7 @@ on_download_token_request_sent (GObject      *object,
       return;
     }
 
-  if (soup_message_get_status (data->message) < SOUP_STATUS_OK ||
-      soup_message_get_status (data->message) >= SOUP_STATUS_MULTIPLE_CHOICES)
+  if (!SOUP_STATUS_IS_SUCCESSFUL (data->message->status_code))
     {
       clear_token (data->request);
       g_object_unref (data->message);
