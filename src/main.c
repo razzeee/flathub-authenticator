@@ -733,12 +733,40 @@ quit_timer (GMainLoop *loop)
   return G_SOURCE_CONTINUE;
 }
 
+static gboolean
+valid_endpoint (const char *url, gboolean allow_insecure_localhost)
+{
+  g_autoptr(SoupURI) uri = soup_uri_new (url);
+  g_autoptr(GInetAddress) address = NULL;
+
+  if (uri == NULL || uri->host == NULL || *uri->host == '\0' ||
+      uri->user != NULL || uri->password != NULL ||
+      uri->query != NULL || uri->fragment != NULL)
+    return FALSE;
+  if (g_strcmp0 (uri->scheme, "https") == 0)
+    return TRUE;
+  if (!allow_insecure_localhost || g_strcmp0 (uri->scheme, "http") != 0)
+    return FALSE;
+  if (g_ascii_strcasecmp (uri->host, "localhost") == 0)
+    return TRUE;
+  address = g_inet_address_new_from_string (uri->host);
+  return address != NULL && g_inet_address_get_is_loopback (address);
+}
+
 
 int
 main (void)
 {
   g_autoptr(GMainLoop) loop = NULL;
   guint id;
+
+  if (!valid_endpoint (FRONTEND_URL, ALLOW_INSECURE_LOCALHOST) ||
+      !valid_endpoint (BACKEND_URL, ALLOW_INSECURE_LOCALHOST))
+    {
+      g_printerr ("Configure HTTPS frontend_url and api_url endpoints. "
+                  "HTTP loopback requires allow_insecure_localhost=true.\n");
+      return 1;
+    }
 
   loop = g_main_loop_new (NULL, FALSE);
   g_timeout_add_seconds (60, G_SOURCE_FUNC (quit_timer), loop);

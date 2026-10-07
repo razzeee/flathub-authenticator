@@ -239,6 +239,27 @@ test_callbacks (void)
   g_assert_cmpint (active_requests, ==, 0);
 }
 
+static void
+test_endpoints (void)
+{
+  const char *invalid[] = { "", "not a URL", "file:///tmp/token", "http://example.com",
+    "https://user:pass@example.com", "https://example.com?x=y", "https://example.com#fragment",
+    "http://localhost.evil.example", "http://192.168.1.1" };
+  const char *local[] = { "http://localhost:3000", "http://127.0.0.1:8000", "http://[::1]:8000" };
+
+  g_assert_true (valid_endpoint ("https://example.com/api", FALSE));
+  for (size_t i = 0; i < G_N_ELEMENTS (invalid); i ++)
+    {
+      g_assert_false (valid_endpoint (invalid[i], FALSE));
+      g_assert_false (valid_endpoint (invalid[i], TRUE));
+    }
+  for (size_t i = 0; i < G_N_ELEMENTS (local); i ++)
+    {
+      g_assert_false (valid_endpoint (local[i], FALSE));
+      g_assert_true (valid_endpoint (local[i], TRUE));
+    }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -250,6 +271,7 @@ main (int argc, char **argv)
   g_test_add_func ("/backend/rotation", test_backend_rotation);
   g_test_add_func ("/backend/http-error", test_backend_http_error);
   g_test_add_func ("/webflow/callbacks", test_callbacks);
+  g_test_add_func ("/transport/endpoints", test_endpoints);
   int result = g_test_run ();
   g_free (webflow_url);
   g_free (stored_token);
