@@ -21,7 +21,7 @@ website is the next best way.
 ### Building and testing
 
 Install Meson, a C compiler, and development packages for GLib/GIO,
-libsoup 2.4, JSON-GLib, and libsecret. Configure the frontend and API URLs
+libsoup 3, JSON-GLib, and libsecret. Configure the frontend and API URLs
 for your deployment, then build and run the regression tests:
 
 ```sh

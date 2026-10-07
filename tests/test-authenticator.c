@@ -74,34 +74,33 @@ static void
 test_webflow_url (void)
 {
   ActiveRequest *req = new_request ();
-  g_autoptr(SoupURI) uri = NULL;
+  g_autoptr(GUri) uri = NULL;
   g_autoptr(GHashTable) query = NULL;
-  g_autoslist(SoupURI) uris = NULL;
+  g_autoslist(GUri) uris = NULL;
   g_autofree char *return_uri = NULL;
 
   redirect_to_frontend (req);
-  uri = soup_uri_new (webflow_url);
-  query = soup_form_decode (uri->query);
+  uri = g_uri_parse (webflow_url, G_URI_FLAGS_ENCODED_QUERY, NULL);
+  query = soup_form_decode (g_uri_get_query (uri));
   uris = soup_server_get_uris (req->return_server);
-  return_uri = soup_uri_to_string (uris->data, FALSE);
+  return_uri = g_uri_to_string (uris->data);
   g_assert_cmpuint (g_hash_table_size (query), ==, 2);
   g_assert_cmpstr (g_hash_table_lookup (query, "refs"), ==, req->refs[0]);
   g_assert_cmpstr (g_hash_table_lookup (query, "return"), ==, return_uri);
-  g_assert_null (uri->fragment);
+  g_assert_null (g_uri_get_fragment (uri));
   end_request_with_cancellation (req);
   g_assert_cmpint (active_requests, ==, 0);
 }
 
 static void
-server_cb (SoupServer *server, SoupMessage *msg, const char *path,
-           GHashTable *query, SoupClientContext *client, gpointer data)
+server_cb (SoupServer *server, SoupServerMessage *msg, const char *path,
+           GHashTable *query, gpointer data)
 {
   (void) server;
   (void) path;
   (void) query;
-  (void) client;
-  soup_message_set_status (msg, backend_status);
-  soup_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+  soup_server_message_set_status (msg, backend_status, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
                              data, strlen (data));
 }
 
@@ -118,7 +117,7 @@ run_backend (const char *body, gboolean cancel)
 {
   g_autoptr(SoupServer) server = soup_server_new (NULL, NULL);
   g_autoptr(SoupSession) session = soup_session_new ();
-  g_autoslist(SoupURI) uris = NULL;
+  g_autoslist(GUri) uris = NULL;
   g_autofree char *uri = NULL;
   g_autoptr(GError) error = NULL;
   ActiveRequest *req = new_request ();
@@ -132,11 +131,11 @@ run_backend (const char *body, gboolean cancel)
   g_assert_true (soup_server_listen_local (server, 0, 0, &error));
   g_assert_no_error (error);
   uris = soup_server_get_uris (server);
-  uri = soup_uri_to_string (uris->data, FALSE);
+  uri = g_uri_to_string (uris->data);
   data->message = soup_message_new ("POST", uri);
   data->request = req;
   req->ref_count ++;
-  soup_session_send_async (session, data->message, req->cancellable,
+  soup_session_send_async (session, data->message, G_PRIORITY_DEFAULT, req->cancellable,
                            on_download_token_request_sent, data);
   if (cancel)
     end_request_with_cancellation (req);
@@ -201,41 +200,63 @@ test_backend_http_error (void)
 }
 
 static void
+http_finished (GObject *source, GAsyncResult *result, gpointer data)
+{
+  gboolean *finished = data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+  g_assert_no_error (error);
+  *finished = TRUE;
+}
+
+static void
+callback_http (const char *base, const char *path, const char *method,
+               const char *origin, unsigned int status)
+{
+  g_autoptr(SoupSession) session = soup_session_new ();
+  g_autoptr(GProxyResolver) proxy = g_simple_proxy_resolver_new (NULL, NULL);
+  g_autofree char *url = g_strconcat (base, path, NULL);
+  g_autoptr(SoupMessage) msg = soup_message_new (method, url);
+  gboolean finished = FALSE;
+  unsigned int timeout = g_timeout_add_seconds (5, test_timeout, NULL);
+
+  g_object_set (session, "proxy-resolver", proxy, NULL);
+  if (origin != NULL)
+    soup_message_headers_replace (soup_message_get_request_headers (msg), "Origin", origin);
+  soup_session_send_and_read_async (session, msg, G_PRIORITY_DEFAULT, NULL, http_finished, &finished);
+  while (!finished)
+    g_main_context_iteration (NULL, TRUE);
+  g_source_remove (timeout);
+  g_assert_cmpuint (soup_message_get_status (msg), ==, status);
+}
+
+static void
 test_callbacks (void)
 {
   ActiveRequest *req = new_request ();
   const char *queries[] = { "", "unknown=x", "token=", "download-token=",
                            "download-token=bad%0D%0Atoken", "token=&download-token=good" };
+  g_autoslist(GUri) uris = NULL;
+  g_autofree char *base = NULL;
+
+  redirect_to_frontend (req);
+  uris = soup_server_get_uris (req->return_server);
+  base = g_uri_to_string (uris->data);
 
   for (size_t i = 0; i < G_N_ELEMENTS (queries); i ++)
     {
-      g_autoptr(SoupMessage) msg = soup_message_new ("GET", "http://127.0.0.1/success");
-      g_autoptr(GHashTable) query = soup_form_decode (queries[i]);
-      handle_return_request (NULL, msg, "/success", query, NULL, req);
-      g_assert_cmpuint (msg->status_code, ==, 400);
+      g_autofree char *path = g_strconcat ("success?", queries[i], NULL);
+      callback_http (base, path, "GET", NULL, 400);
       g_assert_cmpuint (response_count, ==, 0);
       g_assert_null (stored_token);
     }
-  {
-    g_autoptr(SoupMessage) msg = soup_message_new ("POST", "http://127.0.0.1/cancel");
-    handle_cancel_request (NULL, msg, "/cancel", NULL, NULL, req);
-    g_assert_cmpuint (msg->status_code, ==, 405);
-    g_object_set (msg, "method", "GET", NULL);
-    soup_message_headers_replace (msg->request_headers, "Origin", "https://evil.example");
-    handle_cancel_request (NULL, msg, "/cancel", NULL, NULL, req);
-    g_assert_cmpuint (msg->status_code, ==, 403);
-    g_assert_cmpuint (response_count, ==, 0);
-  }
-  {
-    g_autoptr(SoupMessage) msg = soup_message_new ("GET", "http://127.0.0.1/success");
-    g_autoptr(GHashTable) query = soup_form_decode ("download-token=good&unknown=ignored");
-    handle_return_request (NULL, msg, "/success/extra", query, NULL, req);
-    g_assert_cmpuint (msg->status_code, ==, 404);
-    handle_return_request (NULL, msg, "/success", query, NULL, req);
-    g_assert_cmpuint (msg->status_code, ==, 200);
-    g_assert_cmpuint (response_code, ==, 0);
-    g_assert_cmpuint (response_count, ==, 1);
-  }
+  callback_http (base, "cancel", "POST", NULL, 405);
+  callback_http (base, "cancel", "GET", "https://evil.example", 403);
+  callback_http (base, "success/extra?download-token=good", "GET", NULL, 404);
+  g_assert_cmpuint (response_count, ==, 0);
+  callback_http (base, "success?download-token=good&unknown=ignored", "GET", NULL, 200);
+  g_assert_cmpuint (response_code, ==, 0);
+  g_assert_cmpuint (response_count, ==, 1);
   g_assert_cmpint (active_requests, ==, 0);
 }
 
